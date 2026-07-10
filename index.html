@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>PDFメモ</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    font-family: -apple-system, "Hiragino Sans", "Yu Gothic", sans-serif;
+    background: #52565c;
+    display: flex; flex-direction: column;
+  }
+
+  /* ---- ツールバー ---- */
+  #toolbar {
+    background: #2c2f33; color: #fff;
+    display: flex; align-items: center; flex-wrap: wrap;
+    gap: 6px; padding: 8px 10px;
+    padding-top: calc(8px + env(safe-area-inset-top));
+    user-select: none; -webkit-user-select: none;
+    flex-shrink: 0; z-index: 10;
+  }
+  .tb-group { display: flex; align-items: center; gap: 4px;
+    background: #3a3e44; border-radius: 10px; padding: 4px; }
+  .tb-btn {
+    border: none; background: transparent; color: #eee;
+    font-size: 15px; font-family: inherit;
+    min-width: 42px; height: 40px; border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; padding: 0 10px; white-space: nowrap;
+  }
+  .tb-btn:active { background: #55595f; }
+  .tb-btn.active { background: #0a84ff; color: #fff; }
+  .tb-btn:disabled { opacity: .35; }
+
+  .color-btn { min-width: 40px; padding: 0; }
+  .color-dot { width: 24px; height: 24px; border-radius: 50%; border: 2px solid rgba(255,255,255,.7); }
+  .color-btn.active { background: #55595f; }
+  .color-btn.active .color-dot { border-color: #0a84ff; box-shadow: 0 0 0 2px #0a84ff; }
+
+  .width-btn { min-width: 40px; padding: 0; }
+  .width-dot { background: #fff; border-radius: 50%; }
+  .width-btn.active { background: #0a84ff; }
+
+  #pageInfo { font-size: 14px; color: #ccc; padding: 0 6px; min-width: 64px; text-align: center; }
+  #fileName { font-size: 13px; color: #aaa; max-width: 180px; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  .spacer { flex: 1; }
+
+  #fingerLabel { display: flex; align-items: center; gap: 5px; font-size: 13px;
+    color: #ccc; padding: 0 8px; cursor: pointer; }
+  #fingerLabel input { width: 18px; height: 18px; }
+
+  /* ---- 表示エリア ---- */
+  #viewer {
+    flex: 1; overflow-y: auto; overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    display: flex; flex-direction: column; align-items: center;
+    padding: 12px 0 60px;
+  }
+  .page-wrap {
+    position: relative; margin: 0 auto 14px;
+    box-shadow: 0 2px 10px rgba(0,0,0,.4);
+    background: #fff; flex-shrink: 0;
+  }
+  .page-wrap canvas { display: block; }
+  .ann-canvas {
+    position: absolute; left: 0; top: 0;
+    touch-action: pan-y pinch-zoom;
+  }
+  .ann-canvas.finger-draw { touch-action: none; }
+
+  /* ---- 初期画面 ---- */
+  #welcome {
+    color: #ddd; text-align: center; margin-top: 12vh; padding: 20px;
+  }
+  #welcome h1 { font-size: 26px; margin-bottom: 14px; font-weight: 600; }
+  #welcome p { font-size: 15px; line-height: 1.9; color: #bbb; }
+  #bigOpen {
+    margin-top: 26px; font-size: 18px; font-family: inherit;
+    background: #0a84ff; color: #fff; border: none;
+    padding: 16px 42px; border-radius: 14px; cursor: pointer;
+  }
+
+  #toast {
+    position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%);
+    background: rgba(0,0,0,.85); color: #fff; font-size: 15px;
+    padding: 12px 24px; border-radius: 12px; z-index: 100;
+    opacity: 0; transition: opacity .3s; pointer-events: none;
+    max-width: 85vw; text-align: center;
+  }
+  #toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<div id="toolbar">
+  <div class="tb-group">
+    <button class="tb-btn" id="openBtn">📂 開く</button>
+  </div>
+
+  <div class="tb-group" id="colorGroup">
+    <button class="tb-btn color-btn active" data-color="#111111" title="黒">
+      <span class="color-dot" style="background:#111"></span></button>
+    <button class="tb-btn color-btn" data-color="#e02020" title="赤">
+      <span class="color-dot" style="background:#e02020"></span></button>
+    <button class="tb-btn color-btn" data-color="#1560e0" title="青">
+      <span class="color-dot" style="background:#1560e0"></span></button>
+    <button class="tb-btn" id="eraserBtn" title="消しゴム">🧹</button>
+  </div>
+
+  <div class="tb-group" id="widthGroup">
+    <button class="tb-btn width-btn" data-width="1.5" title="細">
+      <span class="width-dot" style="width:5px;height:5px"></span></button>
+    <button class="tb-btn width-btn active" data-width="3" title="中">
+      <span class="width-dot" style="width:9px;height:9px"></span></button>
+    <button class="tb-btn width-btn" data-width="6" title="太">
+      <span class="width-dot" style="width:15px;height:15px"></span></button>
+  </div>
+
+  <div class="tb-group">
+    <button class="tb-btn" id="undoBtn" title="元に戻す">↩︎</button>
+    <button class="tb-btn" id="clearBtn" title="このページのメモを全部消す">🗑</button>
+  </div>
+
+  <div class="tb-group">
+    <button class="tb-btn" id="zoomOut">−</button>
+    <button class="tb-btn" id="zoomIn">＋</button>
+  </div>
+
+  <span id="pageInfo"></span>
+  <label id="fingerLabel"><input type="checkbox" id="fingerDraw">指でも書く</label>
+
+  <span class="spacer"></span>
+  <span id="fileName"></span>
+  <div class="tb-group">
+    <button class="tb-btn" id="saveBtn" style="background:#0a84ff">💾 保存</button>
+  </div>
+</div>
+
+<div id="viewer">
+  <div id="welcome">
+    <h1>PDFメモ</h1>
+    <p>PDFを開いて、Apple Pencilで直接メモが書けます。<br>
+    指ではスクロール、ペンで書き込み。<br>
+    「💾 保存」でメモ入りのPDFをダウンロードできます。</p>
+    <button id="bigOpen">📂 PDFを開く</button>
+  </div>
+</div>
+
+<input type="file" id="fileInput" accept="application/pdf,.pdf" style="display:none">
+<div id="toast"></div>
+
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+  'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+const viewer = document.getElementById('viewer');
+const fileInput = document.getElementById('fileInput');
+const pageInfo = document.getElementById('pageInfo');
+
+let pdfDoc = null;
+let originalBytes = null;   // pdf-lib用に元データを保持
+let currentFile = null;
+let scale = 1;
+let renderGen = 0;          // ズーム連打時の描き直し世代管理
+let pages = [];             // {num, baseW, baseH, wrap, pdfCanvas, annCanvas, strokes[]}
+let undoStack = [];         // {page, stroke}
+let tool = { eraser: false, color: '#111111', width: 3 };
+let fingerDraw = false;
+
+/* ============ ユーティリティ ============ */
+function toast(msg, ms = 2200) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.classList.remove('show'), ms);
+}
+
+function storageKey() {
+  return currentFile ? `pdfmemo:${currentFile.name}:${currentFile.size}` : null;
+}
+
+let saveTimer = null;
+function autoSave() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    const key = storageKey();
+    if (!key) return;
+    try {
+      const data = pages.map(p => p.strokes.map(s => ({
+        e: s.eraser ? 1 : 0, c: s.color, w: s.width,
+        p: s.points.map(pt => [Math.round(pt[0] * 10) / 10, Math.round(pt[1] * 10) / 10])
+      })));
+      localStorage.setItem(key, JSON.stringify(data));
+    } catch (e) { /* 容量オーバー時は自動保存だけ諦める */ }
+  }, 800);
+}
+
+function restoreStrokes() {
+  const key = storageKey();
+  if (!key) return false;
+  const raw = localStorage.getItem(key);
+  if (!raw) return false;
+  try {
+    const data = JSON.parse(raw);
+    let count = 0;
+    data.forEach((arr, i) => {
+      if (!pages[i]) return;
+      pages[i].strokes = arr.map(s => ({
+        eraser: !!s.e, color: s.c, width: s.w, points: s.p
+      }));
+      count += arr.length;
+    });
+    return count > 0;
+  } catch (e) { return false; }
+}
+
+/* ============ PDF読み込み ============ */
+document.getElementById('openBtn').onclick = () => fileInput.click();
+document.getElementById('bigOpen').onclick = () => fileInput.click();
+
+fileInput.onchange = async () => {
+  const file = fileInput.files[0];
+  fileInput.value = '';
+  if (!file) return;
+  try {
+    await loadPdf(file);
+  } catch (e) {
+    console.error(e);
+    toast('PDFを開けませんでした');
+  }
+};
+
+async function loadPdf(file) {
+  toast('読み込み中…', 8000);
+  const buf = await file.arrayBuffer();
+  originalBytes = new Uint8Array(buf);
+  // pdf.jsにはコピーを渡す（workerに転送されるため）
+  pdfDoc = await pdfjsLib.getDocument({ data: originalBytes.slice() }).promise;
+  currentFile = file;
+  document.getElementById('fileName').textContent = file.name;
+
+  viewer.innerHTML = '';
+  pages = [];
+  undoStack = [];
+
+  for (let n = 1; n <= pdfDoc.numPages; n++) {
+    const page = await pdfDoc.getPage(n);
+    const vp1 = page.getViewport({ scale: 1 });
+    const wrap = document.createElement('div');
+    wrap.className = 'page-wrap';
+    const pdfCanvas = document.createElement('canvas');
+    const annCanvas = document.createElement('canvas');
+    annCanvas.className = 'ann-canvas' + (fingerDraw ? ' finger-draw' : '');
+    wrap.appendChild(pdfCanvas);
+    wrap.appendChild(annCanvas);
+    viewer.appendChild(wrap);
+    const p = { num: n, page, baseW: vp1.width, baseH: vp1.height,
+                wrap, pdfCanvas, annCanvas, strokes: [] };
+    pages.push(p);
+    attachDrawing(p);
+  }
+
+  // 横幅にフィット
+  const avail = viewer.clientWidth - 24;
+  scale = Math.min(2, Math.max(0.3, avail / pages[0].baseW));
+
+  const restored = restoreStrokes();
+  await renderAll();
+  updatePageInfo();
+  toast(restored ? '前回のメモを復元しました' : 'PDFを開きました');
+}
+
+/* ============ 描画（レンダリング） ============ */
+async function renderAll() {
+  const gen = ++renderGen;
+  const dpr = window.devicePixelRatio || 1;
+  for (const p of pages) {
+    if (gen !== renderGen) return;
+    const vp = p.page.getViewport({ scale });
+    const cssW = Math.floor(vp.width), cssH = Math.floor(vp.height);
+    for (const c of [p.pdfCanvas, p.annCanvas]) {
+      c.width = Math.floor(cssW * dpr);
+      c.height = Math.floor(cssH * dpr);
+      c.style.width = cssW + 'px';
+      c.style.height = cssH + 'px';
+    }
+    p.wrap.style.width = cssW + 'px';
+    p.wrap.style.height = cssH + 'px';
+    const ctx = p.pdfCanvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    try {
+      await p.page.render({ canvasContext: ctx, viewport: vp }).promise;
+    } catch (e) { /* キャンセルは無視 */ }
+    redrawAnnotations(p);
+  }
+}
+
+function strokeStyle(ctx, s, k) {
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  if (s.eraser) {
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.strokeStyle = 'rgba(0,0,0,1)';
+    ctx.lineWidth = s.width * k;
+  } else {
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.strokeStyle = s.color;
+    ctx.lineWidth = s.width * k;
+  }
+}
+
+function drawStroke(ctx, s, k) {
+  strokeStyle(ctx, s, k);
+  const pts = s.points;
+  if (!pts.length) return;
+  ctx.beginPath();
+  ctx.moveTo(pts[0][0] * k, pts[0][1] * k);
+  if (pts.length === 1) {
+    ctx.lineTo(pts[0][0] * k + 0.01, pts[0][1] * k);
+  } else {
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0] * k, pts[i][1] * k);
+  }
+  ctx.stroke();
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+function redrawAnnotations(p) {
+  const dpr = window.devicePixelRatio || 1;
+  const ctx = p.annCanvas.getContext('2d');
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, p.annCanvas.width, p.annCanvas.height);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  for (const s of p.strokes) drawStroke(ctx, s, scale);
+}
+
+/* ============ 手書き入力 ============ */
+function attachDrawing(p) {
+  const c = p.annCanvas;
+  let drawing = null; // {stroke, last}
+
+  // Apple Pencilでのスクロールを防ぐ（指は通す）
+  const blockStylus = e => {
+    let block = fingerDraw;
+    for (const t of e.touches) {
+      if (t.touchType === 'stylus') block = true;
+    }
+    if (block) e.preventDefault();
+  };
+  c.addEventListener('touchstart', blockStylus, { passive: false });
+  c.addEventListener('touchmove', blockStylus, { passive: false });
+
+  function pos(e) {
+    const r = c.getBoundingClientRect();
+    return [(e.clientX - r.left) / scale, (e.clientY - r.top) / scale];
+  }
+
+  function shouldDraw(e) {
+    if (e.pointerType === 'pen') return true;
+    if (e.pointerType === 'mouse') return e.buttons === 1 || e.type === 'pointerdown';
+    if (e.pointerType === 'touch') return fingerDraw;
+    return false;
+  }
+
+  c.addEventListener('pointerdown', e => {
+    if (!shouldDraw(e)) return;
+    e.preventDefault();
+    c.setPointerCapture(e.pointerId);
+    const width = tool.eraser ? 18 : tool.width;
+    const stroke = { eraser: tool.eraser, color: tool.color, width, points: [pos(e)] };
+    drawing = { stroke };
+    const dpr = window.devicePixelRatio || 1;
+    const ctx = c.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    drawStroke(ctx, stroke, scale);
+  });
+
+  c.addEventListener('pointermove', e => {
+    if (!drawing) return;
+    e.preventDefault();
+    const ctx = c.getContext('2d');
+    const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+    strokeStyle(ctx, drawing.stroke, scale);
+    for (const ev of events) {
+      const pt = pos(ev);
+      const pts = drawing.stroke.points;
+      const last = pts[pts.length - 1];
+      if (Math.abs(pt[0] - last[0]) < 0.3 && Math.abs(pt[1] - last[1]) < 0.3) continue;
+      pts.push(pt);
+      ctx.beginPath();
+      ctx.moveTo(last[0] * scale, last[1] * scale);
+      ctx.lineTo(pt[0] * scale, pt[1] * scale);
+      ctx.stroke();
+    }
+    ctx.globalCompositeOperation = 'source-over';
+  });
+
+  const finish = e => {
+    if (!drawing) return;
+    p.strokes.push(drawing.stroke);
+    undoStack.push({ page: p, stroke: drawing.stroke });
+    drawing = null;
+    autoSave();
+  };
+  c.addEventListener('pointerup', finish);
+  c.addEventListener('pointercancel', finish);
+}
+
+/* ============ ツール選択 ============ */
+const colorBtns = [...document.querySelectorAll('.color-btn')];
+const widthBtns = [...document.querySelectorAll('.width-btn')];
+const eraserBtn = document.getElementById('eraserBtn');
+
+colorBtns.forEach(b => b.onclick = () => {
+  tool.eraser = false;
+  tool.color = b.dataset.color;
+  colorBtns.forEach(x => x.classList.toggle('active', x === b));
+  eraserBtn.classList.remove('active');
+});
+widthBtns.forEach(b => b.onclick = () => {
+  tool.width = parseFloat(b.dataset.width);
+  widthBtns.forEach(x => x.classList.toggle('active', x === b));
+});
+eraserBtn.onclick = () => {
+  tool.eraser = !tool.eraser;
+  eraserBtn.classList.toggle('active', tool.eraser);
+  if (tool.eraser) colorBtns.forEach(x => x.classList.remove('active'));
+  else colorBtns.find(x => x.dataset.color === tool.color).classList.add('active');
+};
+
+document.getElementById('fingerDraw').onchange = e => {
+  fingerDraw = e.target.checked;
+  pages.forEach(p => p.annCanvas.classList.toggle('finger-draw', fingerDraw));
+  toast(fingerDraw ? '指でも書けます（スクロールは画面端で）' : '指はスクロールに戻りました');
+};
+
+/* ============ Undo / ページ消去 ============ */
+document.getElementById('undoBtn').onclick = () => {
+  const last = undoStack.pop();
+  if (!last) { toast('戻す操作がありません'); return; }
+  const i = last.page.strokes.indexOf(last.stroke);
+  if (i >= 0) last.page.strokes.splice(i, 1);
+  redrawAnnotations(last.page);
+  autoSave();
+};
+
+function currentPage() {
+  if (!pages.length) return null;
+  const mid = viewer.scrollTop + viewer.clientHeight / 2;
+  let best = pages[0], bestD = Infinity;
+  for (const p of pages) {
+    const center = p.wrap.offsetTop + p.wrap.offsetHeight / 2;
+    const d = Math.abs(center - mid);
+    if (d < bestD) { bestD = d; best = p; }
+  }
+  return best;
+}
+
+document.getElementById('clearBtn').onclick = () => {
+  const p = currentPage();
+  if (!p || !p.strokes.length) { toast('このページにメモはありません'); return; }
+  if (!confirm(`${p.num}ページのメモをすべて消しますか？`)) return;
+  undoStack = undoStack.filter(u => u.page !== p);
+  p.strokes = [];
+  redrawAnnotations(p);
+  autoSave();
+};
+
+/* ============ ズーム・ページ表示 ============ */
+document.getElementById('zoomIn').onclick = () => setZoom(scale * 1.25);
+document.getElementById('zoomOut').onclick = () => setZoom(scale / 1.25);
+
+function setZoom(s) {
+  if (!pdfDoc) return;
+  scale = Math.min(4, Math.max(0.3, s));
+  renderAll();
+}
+
+viewer.addEventListener('scroll', () => updatePageInfo());
+function updatePageInfo() {
+  const p = currentPage();
+  pageInfo.textContent = p ? `${p.num} / ${pages.length}` : '';
+}
+
+/* ============ 保存（メモ入りPDF） ============ */
+document.getElementById('saveBtn').onclick = async () => {
+  if (!pdfDoc) { toast('先にPDFを開いてください'); return; }
+  toast('PDFを作成中…', 8000);
+  try {
+    const doc = await PDFLib.PDFDocument.load(originalBytes);
+    const pdfPages = doc.getPages();
+    const EXPORT_SCALE = 2; // 書き込みの画質
+
+    for (let i = 0; i < pages.length && i < pdfPages.length; i++) {
+      const p = pages[i];
+      if (!p.strokes.length) continue;
+      const target = pdfPages[i];
+      const { width, height } = target.getSize();
+
+      const off = document.createElement('canvas');
+      off.width = Math.round(p.baseW * EXPORT_SCALE);
+      off.height = Math.round(p.baseH * EXPORT_SCALE);
+      const ctx = off.getContext('2d');
+      ctx.setTransform(EXPORT_SCALE, 0, 0, EXPORT_SCALE, 0, 0);
+      for (const s of p.strokes) drawStroke(ctx, s, 1);
+
+      const png = await doc.embedPng(off.toDataURL('image/png'));
+      target.drawImage(png, { x: 0, y: 0, width, height });
+    }
+
+    const bytes = await doc.save();
+    const blob = new Blob([bytes], { type: 'application/pdf' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = currentFile.name.replace(/\.pdf$/i, '') + '_メモ.pdf';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    toast('保存しました（ダウンロードに保存されます）');
+  } catch (e) {
+    console.error(e);
+    toast('保存に失敗しました：' + e.message, 4000);
+  }
+};
+
+/* 画面回転などで幅が変わったら再フィット */
+let resizeTimer = null;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    if (!pdfDoc) return;
+    const avail = viewer.clientWidth - 24;
+    setZoom(Math.min(2, Math.max(0.3, avail / pages[0].baseW)));
+  }, 300);
+});
+</script>
+</body>
+</html>
