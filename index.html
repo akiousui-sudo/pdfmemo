@@ -96,6 +96,26 @@
     max-width: 85vw; text-align: center;
   }
   #toast.show { opacity: 1; }
+
+  /* ---- 保存方法の選択ダイアログ ---- */
+  #saveModal {
+    position: fixed; inset: 0; background: rgba(0,0,0,.5);
+    display: none; align-items: center; justify-content: center; z-index: 50;
+  }
+  #saveModal.show { display: flex; }
+  #saveBox {
+    background: #fff; border-radius: 16px; padding: 22px;
+    width: min(460px, 90vw); box-shadow: 0 8px 30px rgba(0,0,0,.35);
+  }
+  #saveBox h2 { font-size: 18px; margin-bottom: 14px; color: #222; }
+  .save-opt {
+    display: block; width: 100%; text-align: left; font-family: inherit;
+    border: 1px solid #ccc; background: #f7f7f9; border-radius: 12px;
+    padding: 12px 14px; margin-bottom: 10px; cursor: pointer; font-size: 14px;
+  }
+  .save-opt b { display: block; font-size: 16px; margin-bottom: 4px; color: #111; }
+  .save-opt span { color: #555; line-height: 1.5; }
+  .save-opt:active { background: #e2e2ea; }
 </style>
 </head>
 <body>
@@ -103,6 +123,12 @@
 <div id="toolbar">
   <div class="tb-group">
     <button class="tb-btn" id="openBtn">📂 開く</button>
+  </div>
+
+  <div class="tb-group" id="modeGroup">
+    <button class="tb-btn mode-btn active" data-mode="free" title="フリーハンド">✏️自由</button>
+    <button class="tb-btn mode-btn" data-mode="line" title="A点からB点まで直線">╱直線</button>
+    <button class="tb-btn mode-btn" data-mode="rect" title="A点からB点を対角とする四角で塗りつぶし">▰四角</button>
   </div>
 
   <div class="tb-group" id="colorGroup">
@@ -156,6 +182,22 @@
 </div>
 
 <input type="file" id="fileInput" accept="application/pdf,.pdf" style="display:none">
+
+<div id="saveModal">
+  <div id="saveBox">
+    <h2>保存方法を選んでください</h2>
+    <button class="save-opt" id="saveNormal">
+      <b>📝 通常保存</b>
+      <span>メモを重ねて保存します。文字のコピー・検索はそのまま使えますが、塗りつぶした下の文字データはPDFの中に残ります。</span>
+    </button>
+    <button class="save-opt" id="saveFlat">
+      <b>🔒 完全塗りつぶし保存</b>
+      <span>全ページを画像に変換して保存します。塗りつぶした情報は完全に消えるので、個人情報を隠して外部に渡す場合はこちら。（文字のコピー・検索は不可、ファイルサイズは大きめ）</span>
+    </button>
+    <button class="save-opt" id="saveCancel" style="text-align:center"><b style="margin:0">キャンセル</b></button>
+  </div>
+</div>
+
 <div id="toast"></div>
 
 <script>
@@ -172,7 +214,7 @@ let currentFile = null;
 let scale = 1;
 let pages = [];             // {num, baseW, baseH, wrap, pdfCanvas, annCanvas, strokes[]}
 let undoStack = [];         // {page, stroke}
-let tool = { eraser: false, color: '#111111', width: 3 };
+let tool = { eraser: false, color: '#111111', width: 3, mode: 'free' }; // mode: free=自由 line=直線 rect=四角
 let fingerDraw = false;
 
 /* ============ ユーティリティ ============ */
@@ -196,7 +238,7 @@ function autoSave() {
     if (!key) return;
     try {
       const data = pages.map(p => p.strokes.map(s => ({
-        e: s.eraser ? 1 : 0, c: s.color, w: s.width,
+        e: s.eraser ? 1 : 0, c: s.color, w: s.width, t: s.type || 'free',
         p: s.points.map(pt => [Math.round(pt[0] * 10) / 10, Math.round(pt[1] * 10) / 10])
       })));
       localStorage.setItem(key, JSON.stringify(data));
@@ -215,7 +257,7 @@ function restoreStrokes() {
     data.forEach((arr, i) => {
       if (!pages[i]) return;
       pages[i].strokes = arr.map(s => ({
-        eraser: !!s.e, color: s.c, width: s.w, points: s.p
+        eraser: !!s.e, color: s.c, width: s.w, type: s.t || 'free', points: s.p
       }));
       count += arr.length;
     });
@@ -264,6 +306,8 @@ async function loadPdf(file) {
     wrap.appendChild(annCanvas);
     viewer.appendChild(wrap);
     const p = { num: n, page, baseW: vp1.width, baseH: vp1.height,
+                view: page.view.slice(),        // 表示領域 [x1,y1,x2,y2]（PDF内部座標）
+                rotate: ((page.rotate % 360) + 360) % 360, // ページの回転指定
                 wrap, pdfCanvas, annCanvas, strokes: [] };
     pages.push(p);
     attachDrawing(p);
@@ -370,6 +414,18 @@ function strokeStyle(ctx, s, k) {
 }
 
 function drawStroke(ctx, s, k) {
+  // 四角（面の塗りつぶし）: points[0]とpoints[1]を対角とする長方形
+  if (s.type === 'rect') {
+    const [a, b] = s.points;
+    if (!b) return;
+    ctx.globalCompositeOperation = s.eraser ? 'destination-out' : 'source-over';
+    ctx.fillStyle = s.eraser ? 'rgba(0,0,0,1)' : s.color;
+    ctx.fillRect(Math.min(a[0], b[0]) * k, Math.min(a[1], b[1]) * k,
+                 Math.abs(b[0] - a[0]) * k, Math.abs(b[1] - a[1]) * k);
+    ctx.globalCompositeOperation = 'source-over';
+    return;
+  }
+  // 自由・直線: 折れ線として描く（直線は2点だけの折れ線）
   strokeStyle(ctx, s, k);
   const pts = s.points;
   if (!pts.length) return;
@@ -427,39 +483,55 @@ function attachDrawing(p) {
     e.preventDefault();
     c.setPointerCapture(e.pointerId);
     const width = tool.eraser ? 18 : tool.width;
-    const stroke = { eraser: tool.eraser, color: tool.color, width, points: [pos(e)] };
-    drawing = { stroke };
+    const stroke = { type: tool.mode, eraser: tool.eraser, color: tool.color,
+                     width, points: [pos(e)] };
+    drawing = { stroke, moved: false };
     const d = getDpr();
     const ctx = c.getContext('2d');
     ctx.setTransform(d, 0, 0, d, 0, 0);
-    drawStroke(ctx, stroke, scale);
+    if (stroke.type === 'free') drawStroke(ctx, stroke, scale);
   });
 
   c.addEventListener('pointermove', e => {
     if (!drawing) return;
     e.preventDefault();
     const ctx = c.getContext('2d');
-    const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
-    strokeStyle(ctx, drawing.stroke, scale);
-    for (const ev of events) {
-      const pt = pos(ev);
-      const pts = drawing.stroke.points;
-      const last = pts[pts.length - 1];
-      if (Math.abs(pt[0] - last[0]) < 0.3 && Math.abs(pt[1] - last[1]) < 0.3) continue;
-      pts.push(pt);
-      ctx.beginPath();
-      ctx.moveTo(last[0] * scale, last[1] * scale);
-      ctx.lineTo(pt[0] * scale, pt[1] * scale);
-      ctx.stroke();
+    const stroke = drawing.stroke;
+
+    if (stroke.type === 'free') {
+      const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+      strokeStyle(ctx, stroke, scale);
+      for (const ev of events) {
+        const pt = pos(ev);
+        const pts = stroke.points;
+        const last = pts[pts.length - 1];
+        if (Math.abs(pt[0] - last[0]) < 0.3 && Math.abs(pt[1] - last[1]) < 0.3) continue;
+        pts.push(pt);
+        ctx.beginPath();
+        ctx.moveTo(last[0] * scale, last[1] * scale);
+        ctx.lineTo(pt[0] * scale, pt[1] * scale);
+        ctx.stroke();
+      }
+      ctx.globalCompositeOperation = 'source-over';
+    } else {
+      // 直線・四角: 始点〜現在位置のプレビューを描き直す
+      stroke.points[1] = pos(e);
+      drawing.moved = true;
+      redrawAnnotations(p);
+      const d = getDpr();
+      ctx.setTransform(d, 0, 0, d, 0, 0);
+      drawStroke(ctx, stroke, scale);
     }
-    ctx.globalCompositeOperation = 'source-over';
   });
 
   const finish = e => {
     if (!drawing) return;
-    p.strokes.push(drawing.stroke);
-    undoStack.push({ page: p, stroke: drawing.stroke });
+    const { stroke, moved } = drawing;
     drawing = null;
+    // 直線・四角はドラッグせずタップしただけなら何も描かない
+    if (stroke.type !== 'free' && !moved) { redrawAnnotations(p); return; }
+    p.strokes.push(stroke);
+    undoStack.push({ page: p, stroke });
     autoSave();
   };
   c.addEventListener('pointerup', finish);
@@ -469,7 +541,13 @@ function attachDrawing(p) {
 /* ============ ツール選択 ============ */
 const colorBtns = [...document.querySelectorAll('.color-btn')];
 const widthBtns = [...document.querySelectorAll('.width-btn')];
+const modeBtns = [...document.querySelectorAll('.mode-btn')];
 const eraserBtn = document.getElementById('eraserBtn');
+
+modeBtns.forEach(b => b.onclick = () => {
+  tool.mode = b.dataset.mode;
+  modeBtns.forEach(x => x.classList.toggle('active', x === b));
+});
 
 colorBtns.forEach(b => b.onclick = () => {
   tool.eraser = false;
@@ -545,79 +623,141 @@ function updatePageInfo() {
 /* ============ 保存（メモ入りPDF） ============ */
 // 元のPDFファイルは変更しない。メモを焼き込んだ「別名のコピー」を作り、
 // iPadでは共有シート（ファイルに保存）で保存先を選んでもらう。
-function exportName() {
+function exportName(label) {
   const d = new Date();
   const z = n => String(n).padStart(2, '0');
   const stamp = `${d.getFullYear()}${z(d.getMonth() + 1)}${z(d.getDate())}_${z(d.getHours())}${z(d.getMinutes())}`;
-  return currentFile.name.replace(/\.pdf$/i, '') + `_メモ_${stamp}.pdf`;
+  return currentFile.name.replace(/\.pdf$/i, '') + `_${label}_${stamp}.pdf`;
 }
 
-document.getElementById('saveBtn').onclick = async () => {
+// 通常保存: 元のPDFにメモ画像を重ねる（文字データはそのまま残る）
+async function buildNormalPdf() {
+  const doc = await PDFLib.PDFDocument.load(originalBytes);
+  const pdfPages = doc.getPages();
+  const EXPORT_SCALE = 2; // 書き込みの画質
+
+  for (let i = 0; i < pages.length && i < pdfPages.length; i++) {
+    const p = pages[i];
+    if (!p.strokes.length) continue;
+    const target = pdfPages[i];
+
+    const off = document.createElement('canvas');
+    off.width = Math.round(p.baseW * EXPORT_SCALE);
+    off.height = Math.round(p.baseH * EXPORT_SCALE);
+    const ctx = off.getContext('2d');
+    ctx.setTransform(EXPORT_SCALE, 0, 0, EXPORT_SCALE, 0, 0);
+    for (const s of p.strokes) drawStroke(ctx, s, 1);
+
+    const dataUrl = off.toDataURL('image/png');
+    // iPadはcanvasの合計メモリに上限があるため、使い終わった作業用canvasは
+    // すぐ解放する（放置すると画面表示側のcanvasが破棄されて崩れる）
+    off.width = 0; off.height = 0;
+    const png = await doc.embedPng(dataUrl);
+
+    // 画面表示（pdf.js）は「ページの回転指定」と「表示領域の原点」を反映した
+    // 向きで見えているが、pdf-libの貼り付けは回転前の内部座標で行われる。
+    // 表示上の位置と一致するように、回転角ごとに貼り付け位置・向きを変換する。
+    const x0 = p.view[0], y0 = p.view[1];
+    const w = p.view[2] - p.view[0], h = p.view[3] - p.view[1];
+    const opts =
+      p.rotate === 90  ? { x: x0 + w, y: y0,     width: h, height: w, rotate: PDFLib.degrees(90) } :
+      p.rotate === 180 ? { x: x0 + w, y: y0 + h, width: w, height: h, rotate: PDFLib.degrees(180) } :
+      p.rotate === 270 ? { x: x0,     y: y0 + h, width: h, height: w, rotate: PDFLib.degrees(270) } :
+                         { x: x0,     y: y0,     width: w, height: h };
+    target.drawImage(png, opts);
+  }
+  return doc.save();
+}
+
+// 完全塗りつぶし保存: 全ページを「見たまま」の画像に変換して新しいPDFを作る。
+// 元の文字データは一切引き継がれないので、塗りつぶした情報は完全に消える。
+async function buildFlatPdf() {
+  const doc = await PDFLib.PDFDocument.create();
+  const FLAT_SCALE = 2; // 画像化の解像度
+
+  for (const p of pages) {
+    const off = document.createElement('canvas');
+    off.width = Math.round(p.baseW * FLAT_SCALE);
+    off.height = Math.round(p.baseH * FLAT_SCALE);
+    const ctx = off.getContext('2d');
+
+    // 背景を白で塗ってからページを描画（透明部分が黒くならないように）
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, off.width, off.height);
+    await p.page.render({
+      canvasContext: ctx,
+      viewport: p.page.getViewport({ scale: FLAT_SCALE })
+    }).promise;
+
+    // メモを上に描く
+    ctx.setTransform(FLAT_SCALE, 0, 0, FLAT_SCALE, 0, 0);
+    for (const s of p.strokes) drawStroke(ctx, s, 1);
+
+    const dataUrl = off.toDataURL('image/jpeg', 0.85);
+    off.width = 0; off.height = 0; // canvasメモリをすぐ解放
+
+    const jpg = await doc.embedJpg(dataUrl);
+    const page = doc.addPage([p.baseW, p.baseH]);
+    page.drawImage(jpg, { x: 0, y: 0, width: p.baseW, height: p.baseH });
+  }
+  return doc.save();
+}
+
+async function deliverPdf(bytes, name) {
+  const blob = new Blob([bytes], { type: 'application/pdf' });
+  const file = new File([bytes], name, { type: 'application/pdf' });
+
+  // iPad/iPhone：共有シートで「ファイルに保存」→ 保存先と名前を選べる
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], title: name });
+      toast('保存しました（元のPDFはそのままです）');
+    } catch (e) {
+      if (e.name === 'AbortError') toast('保存をキャンセルしました');
+      else throw e;
+    }
+  } else {
+    // パソコンのブラウザ等：従来通りダウンロード
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    toast('保存しました（ダウンロードに保存されます）');
+  }
+}
+
+const saveModal = document.getElementById('saveModal');
+document.getElementById('saveBtn').onclick = () => {
   if (!pdfDoc) { toast('先にPDFを開いてください'); return; }
-  toast('PDFを作成中…', 8000);
+  saveModal.classList.add('show');
+};
+document.getElementById('saveCancel').onclick = () => saveModal.classList.remove('show');
+saveModal.addEventListener('click', e => {
+  if (e.target === saveModal) saveModal.classList.remove('show');
+});
+document.getElementById('saveNormal').onclick = () => doSave('normal');
+document.getElementById('saveFlat').onclick = () => doSave('flat');
+
+async function doSave(kind) {
+  saveModal.classList.remove('show');
+  toast(kind === 'flat' ? '画像に変換して作成中…（ページ数によって時間がかかります）' : 'PDFを作成中…', 20000);
   try {
-    const doc = await PDFLib.PDFDocument.load(originalBytes);
-    const pdfPages = doc.getPages();
-    const EXPORT_SCALE = 2; // 書き込みの画質
-
-    for (let i = 0; i < pages.length && i < pdfPages.length; i++) {
-      const p = pages[i];
-      if (!p.strokes.length) continue;
-      const target = pdfPages[i];
-      const { width, height } = target.getSize();
-
-      const off = document.createElement('canvas');
-      off.width = Math.round(p.baseW * EXPORT_SCALE);
-      off.height = Math.round(p.baseH * EXPORT_SCALE);
-      const ctx = off.getContext('2d');
-      ctx.setTransform(EXPORT_SCALE, 0, 0, EXPORT_SCALE, 0, 0);
-      for (const s of p.strokes) drawStroke(ctx, s, 1);
-
-      const dataUrl = off.toDataURL('image/png');
-      // iPadはcanvasの合計メモリに上限があるため、使い終わった作業用canvasは
-      // すぐ解放する（放置すると画面表示側のcanvasが破棄されて崩れる）
-      off.width = 0; off.height = 0;
-      const png = await doc.embedPng(dataUrl);
-      target.drawImage(png, { x: 0, y: 0, width, height });
-    }
-
-    const bytes = await doc.save();
-    const name = exportName();
-    const blob = new Blob([bytes], { type: 'application/pdf' });
-    const file = new File([bytes], name, { type: 'application/pdf' });
-
-    // iPad/iPhone：共有シートで「ファイルに保存」→ 保存先と名前を選べる
-    if (navigator.canShare && navigator.canShare({ files: [file] })) {
-      try {
-        await navigator.share({ files: [file], title: name });
-        toast('保存しました（元のPDFはそのままです）');
-      } catch (e) {
-        if (e.name === 'AbortError') toast('保存をキャンセルしました');
-        else throw e;
-      }
-    } else {
-      // パソコンのブラウザ等：従来通りダウンロード
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = name;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
-      toast('保存しました（ダウンロードに保存されます）');
-    }
-
+    const bytes = kind === 'flat' ? await buildFlatPdf() : await buildNormalPdf();
+    await deliverPdf(bytes, exportName(kind === 'flat' ? '塗りつぶし済' : 'メモ'));
+  } catch (e) {
+    console.error(e);
+    toast('保存に失敗しました：' + e.message, 4000);
+  } finally {
     // 保存処理でcanvasメモリを使った後、表示が破棄されていることがあるので
     // 画面付近のページを描き直す
     pages.forEach(p => { p.renderedScale = null; });
     updateVisible();
-  } catch (e) {
-    console.error(e);
-    toast('保存に失敗しました：' + e.message, 4000);
-    pages.forEach(p => { p.renderedScale = null; });
-    updateVisible();
   }
-};
+}
 
 /* 画面回転などで幅が変わったら再フィット。
    iPadはスクロール中のアドレスバー伸縮でもresizeが飛ぶため、
