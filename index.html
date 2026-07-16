@@ -149,7 +149,8 @@
     <h1>PDFメモ</h1>
     <p>PDFを開いて、Apple Pencilで直接メモが書けます。<br>
     指ではスクロール、ペンで書き込み。<br>
-    「💾 保存」でメモ入りのPDFをダウンロードできます。</p>
+    「💾 保存」で、メモ入りのPDFを<b>別ファイル（日時付きの名前）</b>として保存します。<br>
+    元のPDFは変更されません。iPadでは共有シートから「ファイルに保存」を選んでください。</p>
     <button id="bigOpen">📂 PDFを開く</button>
   </div>
 </div>
@@ -542,6 +543,15 @@ function updatePageInfo() {
 }
 
 /* ============ 保存（メモ入りPDF） ============ */
+// 元のPDFファイルは変更しない。メモを焼き込んだ「別名のコピー」を作り、
+// iPadでは共有シート（ファイルに保存）で保存先を選んでもらう。
+function exportName() {
+  const d = new Date();
+  const z = n => String(n).padStart(2, '0');
+  const stamp = `${d.getFullYear()}${z(d.getMonth() + 1)}${z(d.getDate())}_${z(d.getHours())}${z(d.getMinutes())}`;
+  return currentFile.name.replace(/\.pdf$/i, '') + `_メモ_${stamp}.pdf`;
+}
+
 document.getElementById('saveBtn').onclick = async () => {
   if (!pdfDoc) { toast('先にPDFを開いてください'); return; }
   toast('PDFを作成中…', 8000);
@@ -563,23 +573,49 @@ document.getElementById('saveBtn').onclick = async () => {
       ctx.setTransform(EXPORT_SCALE, 0, 0, EXPORT_SCALE, 0, 0);
       for (const s of p.strokes) drawStroke(ctx, s, 1);
 
-      const png = await doc.embedPng(off.toDataURL('image/png'));
+      const dataUrl = off.toDataURL('image/png');
+      // iPadはcanvasの合計メモリに上限があるため、使い終わった作業用canvasは
+      // すぐ解放する（放置すると画面表示側のcanvasが破棄されて崩れる）
+      off.width = 0; off.height = 0;
+      const png = await doc.embedPng(dataUrl);
       target.drawImage(png, { x: 0, y: 0, width, height });
     }
 
     const bytes = await doc.save();
+    const name = exportName();
     const blob = new Blob([bytes], { type: 'application/pdf' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = currentFile.name.replace(/\.pdf$/i, '') + '_メモ.pdf';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
-    toast('保存しました（ダウンロードに保存されます）');
+    const file = new File([bytes], name, { type: 'application/pdf' });
+
+    // iPad/iPhone：共有シートで「ファイルに保存」→ 保存先と名前を選べる
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try {
+        await navigator.share({ files: [file], title: name });
+        toast('保存しました（元のPDFはそのままです）');
+      } catch (e) {
+        if (e.name === 'AbortError') toast('保存をキャンセルしました');
+        else throw e;
+      }
+    } else {
+      // パソコンのブラウザ等：従来通りダウンロード
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+      toast('保存しました（ダウンロードに保存されます）');
+    }
+
+    // 保存処理でcanvasメモリを使った後、表示が破棄されていることがあるので
+    // 画面付近のページを描き直す
+    pages.forEach(p => { p.renderedScale = null; });
+    updateVisible();
   } catch (e) {
     console.error(e);
     toast('保存に失敗しました：' + e.message, 4000);
+    pages.forEach(p => { p.renderedScale = null; });
+    updateVisible();
   }
 };
 
